@@ -15,7 +15,6 @@
 #include "fbgemm_gpu/ops_utils.h"
 
 #include "fbgemm_gpu/dispatch_macros.h"
-#include "fbgemm_gpu/fbgemm_cuda_utils.cuh"
 #include "fbgemm_gpu/layout_transform_ops.cuh"
 #include "fbgemm_gpu/permute_pooled_embedding_ops.h"
 #include "fbgemm_gpu/sparse_ops_utils.h"
@@ -23,25 +22,6 @@
 using Tensor = at::Tensor;
 
 namespace fbgemm_gpu {
-
-Tensor permute_duplicate_pooled_embs_gpu(
-    const Tensor& pooled_embs, // [B_local][Sum_T_global(D)]
-    const Tensor& offset_dim_list,
-    const Tensor& permute_list,
-    const Tensor& inv_offset_dim_list,
-    const Tensor& inv_permute_list) {
-  TORCH_CHECK(offset_dim_list.numel() > 0);
-  TORCH_CHECK(inv_offset_dim_list.numel() > 0);
-
-  return permute_pooled_embs_gpu_impl(
-      pooled_embs,
-      offset_dim_list,
-      permute_list,
-      inv_offset_dim_list,
-      inv_permute_list,
-      true);
-}
-
 Tensor permute_pooled_embs_gpu(
     const Tensor& pooled_embs, // [B_local][Sum_T_global(D)]
     const Tensor& offset_dim_list,
@@ -50,23 +30,6 @@ Tensor permute_pooled_embs_gpu(
     const Tensor& inv_permute_list) {
   TORCH_CHECK(offset_dim_list.numel() == permute_list.numel() + 1);
   TORCH_CHECK(offset_dim_list.numel() == inv_offset_dim_list.numel());
-
-  return permute_pooled_embs_gpu_impl(
-      pooled_embs,
-      offset_dim_list,
-      permute_list,
-      inv_offset_dim_list,
-      inv_permute_list,
-      false);
-}
-
-Tensor permute_pooled_embs_gpu_impl(
-    const Tensor& pooled_embs, // [B_local][Sum_T_global(D)]
-    const Tensor& offset_dim_list,
-    const Tensor& permute_list,
-    const Tensor& inv_offset_dim_list,
-    const Tensor& inv_permute_list,
-    const bool& allow_duplicates = false) {
   // inv_permute_list is not being used so it's not checked here.
   TENSORS_ON_SAME_CUDA_GPU_IF_NOT_OPTIONAL(
       pooled_embs, offset_dim_list, permute_list, inv_offset_dim_list);
@@ -87,10 +50,8 @@ Tensor permute_pooled_embs_gpu_impl(
 
   // Last index in inv_offset_dim_list contains the size of output.
   // This will result in a D -> H sync.
-  const int64_t permuted_embs_dim_sum =
-      allow_duplicates ? inv_offset_dim_list[-1].item<int64_t>() : dim_sum;
   Tensor permuted_pooled_embs = at::empty(
-      {pooled_embs_contiguous.size(0), permuted_embs_dim_sum},
+      {pooled_embs_contiguous.size(0), dim_sum},
       pooled_embs_contiguous.options());
 
   // This kernel is moving D elements per warp.
