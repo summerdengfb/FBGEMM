@@ -8,11 +8,11 @@
 # pyre-strict
 
 import logging
-import math
+from typing import Optional, Union
 
 import torch
 
-from fbgemm_gpu.triton import dequantize_mx4, quantize_mx4
+from fbgemm_gpu.triton import dequantize_mx4, quantize_mx4, RoundingMode
 from fbgemm_gpu.triton.quantize_ref import py_dequantize_mx4, py_quantize_mx4
 
 logger: logging.Logger = logging.getLogger()
@@ -32,33 +32,35 @@ TORCH_BFLOAT16_MAX: float = torch.finfo(torch.bfloat16).max
 
 
 def fp32_to_mx4(
-    tensor: torch.Tensor, group_size: int = 32, use_triton: bool = True
+    tensor: torch.Tensor,
+    group_size: int = 32,
+    rounding_mode: Optional[Union[RoundingMode, int]] = RoundingMode.ceil,
+    use_triton: bool = True,
 ) -> torch.Tensor:
     """Quantize an FP32 tensor to MX4 with triton or native cuda impl.
 
     Args:
         tensor (torch.Tensor): FP32 tensor to quantize with M total elements.
         group_size (int): Compute scale in chunks of group_size.
+        rounding_mode (RoundingMode or int): Which type of rounding to use when computing exponent.
+        Only supported with use_triton=True.
         use_triton (bool): If set, use triton quantization, otherwise cuda.
 
     Return:
         output: MX4 tensor packed into int8 values with total elements (M / 2 + M / groupsize)
     """
     # Accelerated MX4 is only available on cuda, if input is on cpu, use python.
-    # For CPU and triton, set the second dim to 2048 or the nearest power of 2.
-    dim = (
-        2048 if tensor.numel() >= 2048 else 2 ** (math.floor(math.log2(tensor.numel())))
-    )
-    input = (
-        tensor.view(-1)
-        if (tensor.is_cuda and not use_triton) or tensor.numel() % dim != 0
-        else tensor.view(-1, dim)
-    )
+    # Operate on flattened input.
+    input = tensor.flatten()
+
+    if rounding_mode is None:
+        rounding_mode = RoundingMode.ceil
+
     if not tensor.is_cuda:
-        return py_quantize_mx4(input, group_size)
+        return py_quantize_mx4(input, group_size, rounding_mode=rounding_mode)
 
     if use_triton:
-        return quantize_mx4(input, group_size)
+        return quantize_mx4(input, group_size, rounding_mode=rounding_mode)
     else:
         out = torch.ops.fbgemm.quantize_mx_cuda(
             input,
@@ -74,7 +76,7 @@ def fp32_to_mx4(
 
 
 def mx4_to_fp32(
-    tensor: torch.Tensor, group_size: int = 32, use_triton: bool = False
+    tensor: torch.Tensor, group_size: int = 32, use_triton: bool = True
 ) -> torch.Tensor:
     """Dequantize an MX4 tensor to FP32 with triton or native cuda impl.
 

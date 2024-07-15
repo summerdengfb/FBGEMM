@@ -7,6 +7,7 @@
 # pyre-strict
 
 import torch
+
 from fbgemm_gpu.quantize.quantize_ops import dequantize_mx, quantize_mx  # noqa F401
 
 
@@ -48,7 +49,8 @@ if "fbgemm::quantize_mx" not in torch.library._defs:
             int elem_ebits,
             int elem_mbits,
             float elem_max_norm,
-            int mx_group_size
+            int mx_group_size,
+            int? rounding_mode = None
         ) -> Tensor
         """
     )
