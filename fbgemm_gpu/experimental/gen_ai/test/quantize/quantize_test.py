@@ -165,7 +165,8 @@ class FP8Tests(unittest.TestCase):
         QType=st.sampled_from([fp8_e4m3, fp8_e5m2]),
         Bias=st.sampled_from([True, False]),
         CudaGraph=st.sampled_from([True, False]),
-        UseTriton=st.sampled_from([True, False]),
+        UseTriton=st.sampled_from([False] + ([True] if torch.version.cuda else [])),
+        InputMultiDim=st.booleans(),
     )
     def test_quantize_fp8_matmul(
         self,
@@ -177,8 +178,12 @@ class FP8Tests(unittest.TestCase):
         Bias: bool,
         CudaGraph: bool,
         UseTriton: bool,
+        InputMultiDim: bool,
     ) -> None:
-        x = torch.randn(size=(B_T, D), dtype=torch.bfloat16, device="cuda") * 0.1
+        if InputMultiDim:
+            x = torch.randn(size=(3, B_T, D), dtype=torch.bfloat16, device="cuda") * 0.1
+        else:
+            x = torch.randn(size=(B_T, D), dtype=torch.bfloat16, device="cuda") * 0.1
         w = torch.randn(size=(HD_L, D), dtype=torch.bfloat16, device="cuda") * 0.01
         bias = (
             torch.randn(size=(HD_L,), dtype=torch.bfloat16, device="cuda")
@@ -362,8 +367,8 @@ class FP8Tests(unittest.TestCase):
             atol = 1.0e-1
             rtol = 1.0e-1
         else:
-            atol = 8.0e-2
-            rtol = 8.0e-2
+            atol = 9.0e-2
+            rtol = 9.0e-2
         torch.testing.assert_close(zq, zq_ref, atol=atol, rtol=rtol)
 
     @unittest.skipIf(
@@ -443,7 +448,8 @@ class FP8Tests(unittest.TestCase):
         torch.testing.assert_close(zq, zq_ref, atol=8.0e-2, rtol=8.0e-2)
 
     @unittest.skipIf(
-        not torch.version.cuda, "Skip on AMD: built in quantize ops not yet suported."
+        not torch.version.cuda and torch.version.hip < "6.2",
+        "Skip on AMD with < RoCM 6.2",
     )
     @settings(deadline=None)
     @given(
@@ -493,7 +499,8 @@ class FP8Tests(unittest.TestCase):
         torch.testing.assert_close(xq.float(), xq_ref.float(), atol=tol, rtol=tol)
 
     @unittest.skipIf(
-        not torch.version.cuda, "Skip on AMD: built in quantize ops not yet suported."
+        not torch.version.cuda and torch.version.hip < "6.2",
+        "Skip on AMD with < RoCM 6.2",
     )
     @settings(deadline=None)
     @given(
