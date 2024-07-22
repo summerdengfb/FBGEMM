@@ -764,6 +764,7 @@ class SplitTableBatchedEmbeddingBagsCodegen(nn.Module):
                 OptimType.LARS_SGD,
                 OptimType.PARTIAL_ROWWISE_ADAM,
                 OptimType.PARTIAL_ROWWISE_LAMB,
+                OptimType.ENSEMBLE_ROWWISE_ADAGRAD,
                 OptimType.NONE,
             ), f"Optimizer {optimizer} is not supported."
 
@@ -849,9 +850,10 @@ class SplitTableBatchedEmbeddingBagsCodegen(nn.Module):
 
         if optimizer != OptimType.NONE:
             assert (
-                optimizer == OptimType.PARTIAL_ROWWISE_ADAM
+                optimizer
+                in [OptimType.PARTIAL_ROWWISE_ADAM, OptimType.ENSEMBLE_ROWWISE_ADAGRAD]
                 or optimizer_state_dtypes is None
-            ), "optimizer_state_dtypes option is only supported for OptimType.PARTIAL_ROWWISE_ADAM"
+            ), "optimizer_state_dtypes option is only supported for OptimType.PARTIAL_ROWWISE_ADAM and OptimType.ENSEMBLE_ROWWISE_ADAGRAD"
             if optimizer in (OptimType.EXACT_SGD,):
                 # NOTE: make TorchScript work!
                 self._register_nonpersistent_buffers("momentum1")
@@ -874,7 +876,7 @@ class SplitTableBatchedEmbeddingBagsCodegen(nn.Module):
                         cacheable=False,
                         placement=(
                             EmbeddingLocation.MANAGED
-                            if ((not rowwise) and uvm_non_rowwise_momentum)
+                            if (((not rowwise) and uvm_non_rowwise_momentum))
                             else None
                         ),
                     ),
@@ -889,10 +891,12 @@ class SplitTableBatchedEmbeddingBagsCodegen(nn.Module):
                 OptimType.PARTIAL_ROWWISE_ADAM,
                 OptimType.LAMB,
                 OptimType.PARTIAL_ROWWISE_LAMB,
+                OptimType.ENSEMBLE_ROWWISE_ADAGRAD,
             ):
                 rowwise = optimizer in (
                     OptimType.PARTIAL_ROWWISE_ADAM,
                     OptimType.PARTIAL_ROWWISE_LAMB,
+                    OptimType.ENSEMBLE_ROWWISE_ADAGRAD,
                 )
                 momentum2_dtype = (
                     torch.float32
@@ -921,7 +925,10 @@ class SplitTableBatchedEmbeddingBagsCodegen(nn.Module):
             else:
                 # NOTE: make TorchScript work!
                 self._register_nonpersistent_buffers("momentum2")
-            if self._used_rowwise_adagrad_with_counter:
+            if (
+                self._used_rowwise_adagrad_with_counter
+                or optimizer == OptimType.ENSEMBLE_ROWWISE_ADAGRAD
+            ):
                 self._apply_split(
                     construct_split_state(
                         embedding_specs,
@@ -947,12 +954,14 @@ class SplitTableBatchedEmbeddingBagsCodegen(nn.Module):
                     #  but got `Type[torch.float32]`.
                     dtype=torch.float32,
                 )
+            else:
+                self._register_nonpersistent_buffers("prev_iter")
+                self._register_nonpersistent_buffers("row_counter")
+            if self._used_rowwise_adagrad_with_counter:
                 self.register_buffer(
                     "max_counter", torch.tensor([1], dtype=torch.float32)
                 )
             else:
-                self._register_nonpersistent_buffers("prev_iter")
-                self._register_nonpersistent_buffers("row_counter")
                 self.register_buffer(
                     "max_counter",
                     torch.ones(1, dtype=torch.float32, device=self.current_device),
@@ -1454,6 +1463,21 @@ class SplitTableBatchedEmbeddingBagsCodegen(nn.Module):
             offsets=self.row_counter_offsets,
             placements=self.row_counter_placements,
         )
+        if self.optimizer == OptimType.ENSEMBLE_ROWWISE_ADAGRAD:
+            return self._report_io_size_count(
+                "fwd_output",
+                invokers.lookup_ensemble_rowwise_adagrad.invoke(
+                    common_args,
+                    self.optimizer_args,
+                    momentum1,
+                    momentum2,
+                    prev_iter,
+                    row_counter,
+                    # pyre-fixme[6]: Expected `int` for 5th param but got `Union[float,
+                    #  int]`.
+                    self.iter.item(),
+                ),
+            )
         if self._used_rowwise_adagrad_with_counter:
             if (
                 self._max_counter_update_freq > 0
@@ -1879,6 +1903,16 @@ class SplitTableBatchedEmbeddingBagsCodegen(nn.Module):
                 {"exp_avg": states[0], "exp_avg_sq": states[1]}
                 for states in split_optimizer_states
             ]
+        elif self.optimizer == OptimType.ENSEMBLE_ROWWISE_ADAGRAD:
+            list_of_state_dict = [
+                {
+                    "exp_avg": states[0],
+                    "exp_avg_sq": states[1],
+                    "prev_iter": states[2],
+                    "row_counter": states[3],
+                }
+                for states in split_optimizer_states
+            ]
         else:
             raise NotImplementedError(
                 f"Getting optimizer state {self.optimizer} is not implmeneted"
@@ -1944,6 +1978,7 @@ class SplitTableBatchedEmbeddingBagsCodegen(nn.Module):
             OptimType.PARTIAL_ROWWISE_ADAM,
             OptimType.LAMB,
             OptimType.PARTIAL_ROWWISE_LAMB,
+            OptimType.ENSEMBLE_ROWWISE_ADAGRAD,
         ):
             states.append(
                 get_optimizer_states(
@@ -1953,10 +1988,17 @@ class SplitTableBatchedEmbeddingBagsCodegen(nn.Module):
                     self.momentum2_physical_offsets,
                     self.momentum2_physical_placements,
                     rowwise=self.optimizer
-                    in (OptimType.PARTIAL_ROWWISE_ADAM, OptimType.PARTIAL_ROWWISE_LAMB),
+                    in (
+                        OptimType.PARTIAL_ROWWISE_ADAM,
+                        OptimType.PARTIAL_ROWWISE_LAMB,
+                        OptimType.ENSEMBLE_ROWWISE_ADAGRAD,
+                    ),
                 )
             )
-        if self._used_rowwise_adagrad_with_counter:
+        if (
+            self._used_rowwise_adagrad_with_counter
+            or self.optimizer == OptimType.ENSEMBLE_ROWWISE_ADAGRAD
+        ):
             states.append(
                 get_optimizer_states(
                     self.prev_iter_dev,
